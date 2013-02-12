@@ -86,6 +86,10 @@ public class PieControl implements OnClickListener, NavigationCallback {
         mPie.init();
     }
 
+    public void onConfigurationChanged() {
+        if (mPie != null) mPie.onConfigurationChanged();
+    }
+
     public void attachToContainer(FrameLayout container) {
         if (mPie == null) {
             mPie = new PieMenu(mContext, mPanel);
@@ -118,19 +122,18 @@ public class PieControl implements OnClickListener, NavigationCallback {
         return mPie.onTouchEvent(event);
     }
 
-    protected void populateMenu() {
+    public void populateMenu() {
         mBack = makeItem(R.drawable.ic_sysbar_back, 1, BACK_BUTTON, false);
         mHome = makeItem(R.drawable.ic_sysbar_home, 1, HOME_BUTTON, false);
         mRecent = makeItem(R.drawable.ic_sysbar_recent, 1, RECENT_BUTTON, false);
         mMenu = makeItem(R.drawable.ic_sysbar_menu, 1, MENU_BUTTON, mIsAssistantAvailable);
+        mPie.addItem(mMenu);
+
         if(mIsAssistantAvailable) {
             mSearch = makeItem(R.drawable.ic_sysbar_search_side, 1, SEARCH_BUTTON, true);
-        }
-
-        mPie.addItem(mMenu);
-        if(mIsAssistantAvailable) {
             mPie.addItem(mSearch);
         }
+
         mPie.addItem(mRecent);
         mPie.addItem(mHome);
         mPie.addItem(mBack);

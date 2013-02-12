@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2010 The Android Open Source Project
+ * This code has been modified. Portions copyright (C) 2012, ParanoidAndroid Project.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +27,7 @@ import android.animation.TimeInterpolator;
 import android.database.ContentObserver;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -100,23 +102,23 @@ public class PieMenu extends FrameLayout {
 
     // Special purpose
     private static int ANIMATOR_BATTERY_METER = 21;
-    private static int ANIMATOR_SNAP_WOBBLE = 22;
+    private static int ANIMATOR_SNAP_GROW = 22;
 
     private static final int COLOR_ALPHA_MASK = 0xaa000000;
     private static final int COLOR_OPAQUE_MASK = 0xff000000;
     private static final int COLOR_SNAP_BACKGROUND = 0xffffffff;
-    private static final int COLOR_PIE_BACKGROUND = 0xaaff005e;
+    private static final int COLOR_PIE_BACKGROUND = 0xaa000000;
     private static final int COLOR_PIE_BUTTON = 0xb2ffffff;
-    private static final int COLOR_PIE_SELECT = 0xaadbff00;
+    private static final int COLOR_PIE_SELECT = 0xaaffffff;
     private static final int COLOR_PIE_OUTLINES = 0x55ffffff;
     private static final int COLOR_CHEVRON_LEFT = 0x0999cc;
-    private static final int COLOR_CHEVRON_RIGHT = 0x33b5e5;
+    private static final int COLOR_CHEVRON_RIGHT = 0x53d5e5;
     private static final int COLOR_BATTERY_JUICE = 0x33b5e5;
     private static final int COLOR_BATTERY_JUICE_LOW = 0xffbb33;
     private static final int COLOR_BATTERY_JUICE_CRITICAL = 0xff4444;
     private static final int COLOR_BATTERY_BACKGROUND = 0xffffff;
     private static final int COLOR_STATUS = 0xffffff;
-    private static final int BASE_SPEED = 500;
+    private static final int BASE_SPEED = 1000;
     private static final int EMPTY_ANGLE_BASE = 12;
     private static final float SIZE_BASE = 1f;
 
@@ -137,6 +139,7 @@ public class PieMenu extends FrameLayout {
     private int mPanelOrientation;
     private int mInnerPieRadius;
     private int mOuterPieRadius;
+    private int mPieGap;
     private int mInnerChevronRadius;
     private int mOuterChevronRadius;
     private int mInnerBatteryRadius;
@@ -208,20 +211,62 @@ public class PieMenu extends FrameLayout {
         public boolean active;
     }
 
-    private SnapPoint[] mSnapPoint = new SnapPoint[4];
+    private SnapPoint[] mSnapPoint = new SnapPoint[3];
     int mSnapRadius;
+    int mSnapThickness;
 
     // Flags
     private int mStatusMode;
     private float mPieSize = SIZE_BASE;
     private boolean mOpen;
     private boolean mNavbarZero;
+    private boolean mUseMenuAlways;
+    private boolean mUseSearch;
+    private boolean mHapticFeedback;
 
     // Animations
     private int mGlowOffsetLeft = 150;
     private int mGlowOffsetRight = 150;
-    private ValueAnimator[] mAnimators = new ValueAnimator[25];
-    private float[] mAnimatedFraction = new float[25];
+    
+    private class CustomValueAnimator {
+
+        public CustomValueAnimator(int animateIndex) {
+            index = animateIndex;
+            manual = false;
+            animateIn = true;
+            animator = ValueAnimator.ofInt(0, 1);
+            animator.addUpdateListener(new CustomAnimatorUpdateListener(index));
+            fraction = 0;
+        }
+
+        public void start() {
+            if (!manual) {
+                animator.setDuration(duration);
+                animator.start();
+            }
+        }
+
+        public void reverse(int milliSeconds) {
+            if (!manual) {
+                animator.setDuration(milliSeconds);
+                animator.reverse();
+            }
+        }
+
+        public void cancel() {
+            animator.cancel();
+            fraction = 0;
+        }
+
+        public int index;
+        public int duration;
+        public boolean manual;
+        public boolean animateIn;
+        public float fraction;
+        public ValueAnimator animator;
+    }
+
+    private CustomValueAnimator[] mAnimators = new CustomValueAnimator[25];
 
     private void getDimensions() {
         mPanelDegree = mPanel.getDegree();
@@ -230,19 +275,32 @@ public class PieMenu extends FrameLayout {
         // Fetch modes
         boolean expanded = Settings.System.getInt(mContext.getContentResolver(),
                 Settings.System.EXPANDED_DESKTOP_STATE, 0) == 1;
+        mUseMenuAlways = Settings.System.getInt(mContext.getContentResolver(), Settings.System.PIE_MENU, 0) == 1;
+        mUseSearch = Settings.System.getInt(mContext.getContentResolver(), Settings.System.PIE_SEARCH, 1) == 1;
         mNavbarZero = Integer.parseInt(ExtendedPropertiesUtils.getProperty(
                 "com.android.systemui.navbar.dpi", "100")) == 0 && !expanded;
         mStatusMode = Settings.System.getInt(mContext.getContentResolver(),
                 Settings.System.PIE_MODE, 2);
         mPieSize = Settings.System.getFloat(mContext.getContentResolver(),
                 Settings.System.PIE_SIZE, 1f);
+        mPieGap = Settings.System.getInt(mContext.getContentResolver(),
+                Settings.System.PIE_GAP, 1);
+        mHapticFeedback = Settings.System.getInt(mContext.getContentResolver(),
+                Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0;
 
         // Snap
         mSnapRadius = (int)(mResources.getDimensionPixelSize(R.dimen.pie_snap_radius) * mPieSize);
-        mSnapPoint[0] = new SnapPoint(0,getHeight()/2, mSnapRadius, 0x22, Gravity.LEFT);
-        mSnapPoint[1] = new SnapPoint(getWidth()/2,0, mSnapRadius, 0x22, Gravity.TOP);
-        mSnapPoint[2] = new SnapPoint(getWidth(),getHeight()/2, mSnapRadius, 0x22, Gravity.RIGHT);
-        mSnapPoint[3] = new SnapPoint(getWidth()/2,getHeight(), mSnapRadius, 0x22, Gravity.BOTTOM);
+        mSnapThickness = (int)(mResources.getDimensionPixelSize(R.dimen.pie_snap_thickness) * mPieSize);
+
+        int snapIndex = 0;
+        if (mPanelOrientation != Gravity.LEFT)
+            mSnapPoint[snapIndex++] = new SnapPoint(0 + mSnapThickness / 2,getHeight()/2, mSnapRadius, 0x22, Gravity.LEFT);
+        if (mPanelOrientation != Gravity.TOP)
+            mSnapPoint[snapIndex++] = new SnapPoint(getWidth()/2,0 + mSnapThickness / 2, mSnapRadius, 0x22, Gravity.TOP);
+        if (mPanelOrientation != Gravity.RIGHT)
+            mSnapPoint[snapIndex++] = new SnapPoint(getWidth() - mSnapThickness / 2,getHeight()/2, mSnapRadius, 0x22, Gravity.RIGHT);
+        if (mPanelOrientation != Gravity.BOTTOM)
+            mSnapPoint[snapIndex++] = new SnapPoint(getWidth()/2, getHeight() - mSnapThickness / 2, mSnapRadius, 0x22, Gravity.BOTTOM);
 
         // Create Pie
         mEmptyAngle = (int)(EMPTY_ANGLE_BASE * mPieSize);
@@ -287,8 +345,8 @@ public class PieMenu extends FrameLayout {
             mBatteryJuice.setColor(COLOR_BATTERY_JUICE);
         }
 
-        mStartBattery = mPanel.getDegree() + mEmptyAngle + 1;
-        mEndBattery = mPanel.getDegree() + 88;
+        mStartBattery = mPanel.getDegree() + mEmptyAngle + mPieGap;
+        mEndBattery = mPanel.getDegree() + (mPieGap <= 2 ? 88 : 90 - mPieGap);
         mBatteryPathBackground = makeSlice(mStartBattery, mEndBattery, mInnerBatteryRadius, mOuterBatteryRadius, mCenter);
         mBatteryPathJuice = makeSlice(mStartBattery, mStartBattery + mBatteryLevel * (mEndBattery-mStartBattery) /
                 100, mInnerBatteryRadius, mOuterBatteryRadius, mCenter);
@@ -299,6 +357,7 @@ public class PieMenu extends FrameLayout {
 
         mNotificationPaint.setColor(COLOR_STATUS);
         mSnapBackground.setColor(COLOR_SNAP_BACKGROUND);
+        mStatusPaint.setColor(COLOR_STATUS);
 
         if (ColorUtils.getPerAppColorState(mContext)) {
             ColorUtils.ColorSettingInfo colorInfo;
@@ -312,7 +371,6 @@ public class PieMenu extends FrameLayout {
             mClockPaint.setColor(colorInfo.lastColor);
             mAmPmPaint.setColor(colorInfo.lastColor);
             mClockPaint.setColor(colorInfo.lastColor);
-            mStatusPaint.setColor(colorInfo.lastColor);
 
             mChevronBackgroundLeft.setColor(ColorUtils.extractRGB(buttonColorInfo.lastColor) | COLOR_OPAQUE_MASK);
             mChevronBackgroundRight.setColor(ColorUtils.extractRGB(buttonColorInfo.lastColor) | COLOR_OPAQUE_MASK);
@@ -330,7 +388,6 @@ public class PieMenu extends FrameLayout {
             mPieOutlines.setColor(COLOR_PIE_OUTLINES);
             mClockPaint.setColor(COLOR_STATUS);
             mAmPmPaint.setColor(COLOR_STATUS);
-            mStatusPaint.setColor(COLOR_STATUS);
             mChevronBackgroundLeft.setColor(COLOR_CHEVRON_LEFT);
             mChevronBackgroundRight.setColor(COLOR_CHEVRON_RIGHT);
             mBatteryJuice.setColorFilter(null);
@@ -350,50 +407,64 @@ public class PieMenu extends FrameLayout {
         measureClock(mPolicy.getSimpleTime());
 
         // Determine animationspeed
-        mOverallSpeed = BASE_SPEED * mStatusMode;
+        mOverallSpeed = BASE_SPEED * (mStatusMode == -1 ? 0 : mStatusMode);
 
         // Create animators
         for (int i = 0; i < mAnimators.length; i++) {
-            ValueAnimator animator = ValueAnimator.ofInt(0, 1);
-            animator.addUpdateListener(new CustomAnimatorUpdateListener(i));
-            mAnimators[i] = animator;
-            mAnimatedFraction[i] = 0;
+            mAnimators[i] = new CustomValueAnimator(i);
         }
 
         // Linear animators
-        mAnimators[ANIMATOR_DEC_SPEED10].setDuration((int)(mOverallSpeed * 1));
-        mAnimators[ANIMATOR_DEC_SPEED10].setInterpolator(new DecelerateInterpolator());
+        mAnimators[ANIMATOR_DEC_SPEED10].duration = (int)(mOverallSpeed * 1);
+        mAnimators[ANIMATOR_DEC_SPEED10].animator.setInterpolator(new DecelerateInterpolator());
 
-        mAnimators[ANIMATOR_DEC_SPEED15].setDuration((int)(mOverallSpeed * 1.5));
-        mAnimators[ANIMATOR_DEC_SPEED15].setInterpolator(new DecelerateInterpolator());
+        mAnimators[ANIMATOR_DEC_SPEED15].duration = (int)(mOverallSpeed * 1.5);
+        mAnimators[ANIMATOR_DEC_SPEED15].animator.setInterpolator(new DecelerateInterpolator());
 
-        mAnimators[ANIMATOR_DEC_SPEED30].setDuration((int)(mOverallSpeed * 3));
-        mAnimators[ANIMATOR_DEC_SPEED30].setInterpolator(new DecelerateInterpolator());
+        mAnimators[ANIMATOR_DEC_SPEED30].duration = (int)(mOverallSpeed * 3);
+        mAnimators[ANIMATOR_DEC_SPEED30].animator.setInterpolator(new DecelerateInterpolator());
 
-        mAnimators[ANIMATOR_ACC_SPEED10].setDuration((int)(mOverallSpeed * 1));
-        mAnimators[ANIMATOR_ACC_SPEED10].setInterpolator(new AccelerateInterpolator());
+        mAnimators[ANIMATOR_ACC_SPEED10].duration = (int)(mOverallSpeed * 1);
+        mAnimators[ANIMATOR_ACC_SPEED10].animator.setInterpolator(new AccelerateInterpolator());
 
-        mAnimators[ANIMATOR_ACC_SPEED15].setDuration((int)(mOverallSpeed * 1.5));
-        mAnimators[ANIMATOR_ACC_SPEED15].setInterpolator(new AccelerateInterpolator());
+        mAnimators[ANIMATOR_ACC_SPEED15].duration = (int)(mOverallSpeed * 1.5);
+        mAnimators[ANIMATOR_ACC_SPEED15].animator.setInterpolator(new AccelerateInterpolator());
 
-        mAnimators[ANIMATOR_ACC_SPEED30].setDuration((int)(mOverallSpeed * 3));
-        mAnimators[ANIMATOR_ACC_SPEED30].setInterpolator(new AccelerateInterpolator());
+        mAnimators[ANIMATOR_ACC_SPEED30].duration = (int)(mOverallSpeed * 3);
+        mAnimators[ANIMATOR_ACC_SPEED30].animator.setInterpolator(new AccelerateInterpolator());
 
         // Cascade accelerators
         for(int i = ANIMATOR_ACC_INC_1; i < ANIMATOR_ACC_INC_15 + 1; i++) {
-            mAnimators[i].setDuration((int)(mOverallSpeed - (mOverallSpeed * 0.8) / (i + 2)));
-            mAnimators[i].setInterpolator(new AccelerateInterpolator());
-            mAnimators[i].setStartDelay(i * mOverallSpeed / 10);
+            mAnimators[i].duration = (int)(mOverallSpeed - (mOverallSpeed * 0.8) / (i + 2));
+            mAnimators[i].animator.setInterpolator(new AccelerateInterpolator());
+            mAnimators[i].animator.setStartDelay(i * mOverallSpeed / 10);
         }
 
         // Special purpose
-        mAnimators[ANIMATOR_BATTERY_METER].setDuration((int)(mOverallSpeed * 1.5));
-        mAnimators[ANIMATOR_BATTERY_METER].setInterpolator(new DecelerateInterpolator());
+        mAnimators[ANIMATOR_BATTERY_METER].duration = (int)(mOverallSpeed * 1.5);
+        mAnimators[ANIMATOR_BATTERY_METER].animator.setInterpolator(new DecelerateInterpolator());
 
-        mAnimators[ANIMATOR_SNAP_WOBBLE].setDuration(400);
-        mAnimators[ANIMATOR_SNAP_WOBBLE].setInterpolator(new DecelerateInterpolator());
-        mAnimators[ANIMATOR_SNAP_WOBBLE].setRepeatMode(ValueAnimator.REVERSE);
-        mAnimators[ANIMATOR_SNAP_WOBBLE].setRepeatCount(ValueAnimator.INFINITE);
+        mAnimators[ANIMATOR_SNAP_GROW].manual = true;
+        mAnimators[ANIMATOR_SNAP_GROW].animator.setDuration(1000);
+        mAnimators[ANIMATOR_SNAP_GROW].animator.setInterpolator(new AccelerateInterpolator());
+        mAnimators[ANIMATOR_SNAP_GROW].animator.addListener(new Animator.AnimatorListener() {
+            @Override public void onAnimationCancel(Animator animation) {}
+            @Override public void onAnimationRepeat(Animator animation) {}
+            @Override public void onAnimationStart(Animator animation) {}
+            @Override public void onAnimationEnd(Animator animation) {
+                if (mAnimators[ANIMATOR_SNAP_GROW].fraction == 1) {
+                    for (int i = 0; i < 3; i++) {
+                        SnapPoint snap = mSnapPoint[i];
+                        if (snap.active) {
+                            if(mHapticFeedback) mVibrator.vibrate(2);
+                            mStatusPanel.hidePanels(true);
+                            deselect();
+                            animateOut();
+                            mPanel.reorient(snap.gravity);
+                        }
+                    }
+                }
+            }});
     }
 
     private void measureClock(String text) {
@@ -470,14 +541,12 @@ public class PieMenu extends FrameLayout {
         mPieSelected.setAntiAlias(true);
         mPieOutlines.setAntiAlias(true);
         mPieOutlines.setStyle(Style.STROKE);
-        mPieOutlines.setStrokeWidth(0);
+        mPieOutlines.setStrokeWidth(mResources.getDimensionPixelSize(R.dimen.pie_outline));
         mChevronBackgroundLeft.setAntiAlias(true);
         mChevronBackgroundRight.setAntiAlias(true);
         mBatteryJuice.setAntiAlias(true);
         mBatteryBackground.setAntiAlias(true);
         mSnapBackground.setAntiAlias(true);
-
-        Typeface robotoThin = Typeface.create("sans-serif-light", Typeface.NORMAL);
 
         mClockPaint = new Paint();
         mClockPaint.setAntiAlias(true);     
@@ -509,6 +578,10 @@ public class PieMenu extends FrameLayout {
     public void init() {
         mStatusPanel = new PieStatusPanel(mContext, mPanel);
         getNotifications();
+    }
+
+    public void onConfigurationChanged() {
+        if (mStatusPanel != null) mStatusPanel.updatePanelConfiguration();
     }
 
     public PieStatusPanel getStatusPanel() {
@@ -546,28 +619,39 @@ public class PieMenu extends FrameLayout {
         mStatusPath.addCircle(mCenter.x, mCenter.y, mStatusRadius, Path.Direction.CW);
     }
 
+    private boolean canItemDisplay(PieItem item) {
+        return !(item.getName().equals(PieControl.MENU_BUTTON) && !mPanel.currentAppUsesMenu() && !mUseMenuAlways) &&
+                !(item.getName().equals(PieControl.SEARCH_BUTTON) && !mUseSearch);
+    }
+
     private void layoutPie() {
         float emptyangle = mEmptyAngle * (float)Math.PI / 180;
         int inner = mInnerPieRadius;
         int outer = mOuterPieRadius;
-        int gap = 1;
+
+        int itemCount = mItems.size();
+        if (!mPanel.currentAppUsesMenu() && !mUseMenuAlways) itemCount--;
+        if (!mUseSearch) itemCount--;
+
 
         int lesserSweepCount = 0;
         for (PieItem item : mItems) {
-            if (item.isLesser()) {
+            if (item.isLesser() && canItemDisplay(item)) {
                 lesserSweepCount += 1;
             }
         }
 
-        float adjustedSweep = lesserSweepCount > 0 ? (((1-0.65f) * lesserSweepCount) / (mItems.size()-lesserSweepCount)) : 0;    
+        float adjustedSweep = lesserSweepCount > 0 ? (((1-0.65f) * lesserSweepCount) / (itemCount-lesserSweepCount)) : 0;    
         float sweep = 0;
         float angle = 0;
         float total = 0;
 
         for (PieItem item : mItems) {
-            sweep = ((float) (Math.PI - 2 * emptyangle) / mItems.size()) * (item.isLesser() ? 0.65f : 1 + adjustedSweep);
+            if (!canItemDisplay(item)) continue;
+
+            sweep = ((float) (Math.PI - 2 * emptyangle) / itemCount) * (item.isLesser() ? 0.65f : 1 + adjustedSweep);
             angle = (emptyangle + sweep / 2 - (float)Math.PI/2);
-            item.setPath(makeSlice(getDegrees(0) - gap, getDegrees(sweep) + gap, outer, inner, mCenter));
+            item.setPath(makeSlice(getDegrees(0) - mPieGap, getDegrees(sweep) + mPieGap, outer, inner, mCenter));
             View view = item.getView();
 
             if (view != null) {
@@ -610,14 +694,15 @@ public class PieMenu extends FrameLayout {
     }
 
     private class CustomAnimatorUpdateListener implements ValueAnimator.AnimatorUpdateListener {
-        private int mIndex = 0;
-        public CustomAnimatorUpdateListener(int index) {
+
+        private int mIndex;
+        CustomAnimatorUpdateListener(int index) {
             mIndex = index;
         }
 
         @Override
-        public void onAnimationUpdate(ValueAnimator animation) {
-            mAnimatedFraction[mIndex] = (float)animation.getAnimatedFraction();
+        public void onAnimationUpdate(ValueAnimator animation) {            
+            mAnimators[mIndex].fraction = animation.getAnimatedFraction();
 
             // Special purpose animators go here
             if (mIndex == ANIMATOR_BATTERY_METER) {
@@ -628,27 +713,25 @@ public class PieMenu extends FrameLayout {
         }
     }
 
-    private void animateIn() {
-        // Cancel & start all animations
+    private void cancelAnimation() {
         for (int i = 0; i < mAnimators.length; i++) {
             mAnimators[i].cancel();
-            mAnimatedFraction[i] = 0;
         }
+    }
 
+    private void animateIn() {
+        // Cancel & start all animations
+        cancelAnimation();
         invalidate();
-
         for (int i = 0; i < mAnimators.length; i++) {
+            mAnimators[i].animateIn = true;
             mAnimators[i].start();
         }
     }
 
     public void animateOut() {
         mPanel.show(false);
-        // Cancel & start all animations
-        for (int i = 0; i < mAnimators.length; i++) {
-            mAnimators[i].cancel();
-            mAnimatedFraction[i] = 0;
-        }
+        cancelAnimation();
     }
 
     @Override
@@ -657,40 +740,39 @@ public class PieMenu extends FrameLayout {
             int state;
 
             // Draw background
-            if (mStatusMode != 0 && !mNavbarZero) {
-                canvas.drawARGB((int)(mAnimatedFraction[ANIMATOR_DEC_SPEED15] * 0xcc), 0, 0, 0);
+            if (mStatusMode != -1 && !mNavbarZero) {
+                canvas.drawARGB((int)(mAnimators[ANIMATOR_DEC_SPEED15].fraction * 0xcc), 0, 0, 0);
             }
 
             // Snap points
             if (mCenterDistance > mOuterChevronRadius) {
-                for (int i = 0; i < 4; i++) {
+                for (int i = 0; i < 3; i++) {
                     SnapPoint snap = mSnapPoint[i];
-                    mSnapBackground.setAlpha(snap.alpha);
+                    mSnapBackground.setAlpha((int)(snap.alpha + (snap.active ? mAnimators[ANIMATOR_SNAP_GROW].fraction * 80 : 0)));
 
-                    int wobble = 0;
-                    if (snap.active) {
-                        wobble = (int)(mAnimatedFraction[ANIMATOR_SNAP_WOBBLE] * mSnapRadius / 2);
-                        wobble = mSnapRadius + wobble;
+                    canvas.drawCircle (snap.x, snap.y, snap.radius + (snap.active ? mAnimators[ANIMATOR_SNAP_GROW].fraction *
+                            Math.max(getWidth(), getHeight()) : 0), mSnapBackground);
 
-                        /*mAnimators[ANIMATOR_SNAP_WOBBLE].setRepeatCount(0);
-                        mAnimators[ANIMATOR_SNAP_WOBBLE].cancel();
-                        mAnimatedFraction[ANIMATOR_SNAP_WOBBLE] = 0;*/
-                    }
-                    canvas.drawCircle (snap.x, snap.y, snap.radius + wobble, mSnapBackground);
+                    mSnapBackground.setAlpha((int)(snap.alpha * 2.15f  + (snap.active ? mAnimators[ANIMATOR_SNAP_GROW].fraction * 80 : 0)));
+                    int len = (int)(snap.radius * 1.3f + (snap.active ? mAnimators[ANIMATOR_SNAP_GROW].fraction * 500 : 0));
+                    int thick = (int)(len * 0.2f);
+                    canvas.drawRect(snap.x - len / 2, snap.y - thick / 2, snap.x + len / 2, snap.y + thick / 2, mSnapBackground);
+                    canvas.drawRect(snap.x - thick / 2, snap.y - len / 2, snap.x + thick / 2, snap.y + len / 2, mSnapBackground);
                 }
             }
 
             // Draw base menu
             for (PieItem item : mItems) {
+                if (!canItemDisplay(item)) continue;
                 drawItem(canvas, item);
             }
 
             // Paint status report only if settings allow
-            if (mStatusMode != 0 && !mNavbarZero) {
+            if (mStatusMode != -1 && !mNavbarZero) {
 
                 // Draw chevron rings
-                mChevronBackgroundLeft.setAlpha((int)(mAnimatedFraction[ANIMATOR_DEC_SPEED30] * mGlowOffsetLeft * (mPanelOrientation == Gravity.TOP ? 0.2 : 1)));
-                mChevronBackgroundRight.setAlpha((int)(mAnimatedFraction[ANIMATOR_DEC_SPEED30] * mGlowOffsetRight * (mPanelOrientation == Gravity.TOP ? 0.2 : 1)));
+                mChevronBackgroundLeft.setAlpha((int)(mAnimators[ANIMATOR_DEC_SPEED30].fraction * mGlowOffsetLeft * (mPanelOrientation == Gravity.TOP ? 0.2 : 1)));
+                mChevronBackgroundRight.setAlpha((int)(mAnimators[ANIMATOR_DEC_SPEED30].fraction * mGlowOffsetRight * (mPanelOrientation == Gravity.TOP ? 0.2 : 1)));
 
                 if (mStatusPanel.getCurrentViewState() != PieStatusPanel.QUICK_SETTINGS_PANEL && mChevronPathLeft != null) {
                     state = canvas.save();
@@ -710,11 +792,11 @@ public class PieMenu extends FrameLayout {
                 if (mPanelOrientation != Gravity.TOP) {
 
                     // Draw Battery
-                    mBatteryBackground.setAlpha((int)(mAnimatedFraction[ANIMATOR_ACC_SPEED15] * 0x22));
-                    mBatteryJuice.setAlpha((int)(mAnimatedFraction[ANIMATOR_ACC_SPEED15] * 0x88));
+                    mBatteryBackground.setAlpha((int)(mAnimators[ANIMATOR_ACC_SPEED15].fraction * 0x22));
+                    mBatteryJuice.setAlpha((int)(mAnimators[ANIMATOR_ACC_SPEED15].fraction * 0x88));
 
                     state = canvas.save();
-                    canvas.rotate(90 + (1-mAnimatedFraction[ANIMATOR_ACC_INC_1]) * 1000, mCenter.x, mCenter.y);
+                    canvas.rotate(90 + (1-mAnimators[ANIMATOR_ACC_INC_1].fraction) * 500, mCenter.x, mCenter.y);
                     canvas.drawPath(mBatteryPathBackground, mBatteryBackground);
                     canvas.restoreToCount(state);
 
@@ -727,19 +809,19 @@ public class PieMenu extends FrameLayout {
                     state = canvas.save();
                     canvas.rotate(mClockTextRotation, mCenter.x, mCenter.y);
 
-                    mClockPaint.setAlpha((int)(mAnimatedFraction[ANIMATOR_DEC_SPEED30] * 0xcc));
+                    mClockPaint.setAlpha((int)(mAnimators[ANIMATOR_DEC_SPEED30].fraction * 0xcc));
                     float lastPos = 0;
                     for(int i = 0; i < mClockText.length(); i++) {
                         canvas.drawTextOnPath("" + mClockText.charAt(i), mStatusPath, lastPos, mClockOffset, mClockPaint);
                         lastPos += mClockTextOffsets[i];
                     }
 
-                    mAmPmPaint.setAlpha((int)(mAnimatedFraction[ANIMATOR_DEC_SPEED15] * 0xaa));
+                    mAmPmPaint.setAlpha((int)(mAnimators[ANIMATOR_DEC_SPEED15].fraction * 0xaa));
                     canvas.drawTextOnPath(mClockTextAmPm, mStatusPath, lastPos - mClockTextAmPmSize, mAmPmOffset, mAmPmPaint);
                     canvas.restoreToCount(state);
 
                     // Device status information and date
-                    mStatusPaint.setAlpha((int)(mAnimatedFraction[ANIMATOR_ACC_SPEED15] * 0xaa));
+                    mStatusPaint.setAlpha((int)(mAnimators[ANIMATOR_ACC_SPEED15].fraction * 0xaa));
                     
                     state = canvas.save();
                     canvas.rotate(mPanel.getDegree() + 180, mCenter.x, mCenter.y);
@@ -752,15 +834,15 @@ public class PieMenu extends FrameLayout {
 
                     // Notifications
                     if (mStatusPanel.getCurrentViewState() != PieStatusPanel.NOTIFICATIONS_PANEL) {
-                        mNotificationPaint.setAlpha((int)(mAnimatedFraction[ANIMATOR_ACC_SPEED30] * mGlowOffsetRight));
+                        mNotificationPaint.setAlpha((int)(mAnimators[ANIMATOR_ACC_SPEED30].fraction * mGlowOffsetRight));
 
                         for (int i = 0; i < mNotificationCount && i < 10; i++) {
                             canvas.drawTextOnPath(mNotificationText[i], mNotificationPath[i],
-                                    (1-mAnimatedFraction[ANIMATOR_ACC_INC_1 + i]) * 500, 0, mNotificationPaint);
+                                    (1-mAnimators[ANIMATOR_ACC_INC_1 + i].fraction) * 500, 0, mNotificationPaint);
 
                             int IconState = canvas.save();
                             int posX = (int)(mCenter.x + mNotificationsRadius + i * mNotificationsRowSize +
-                                    (1-mAnimatedFraction[ANIMATOR_ACC_INC_1 + i]) * 2000);
+                                    (1-mAnimators[ANIMATOR_ACC_INC_1 + i].fraction) * 2000);
                             int posY = (int)(mCenter.y - mNotificationIconSize * 1.4f);
                             int iconCenter = mNotificationIconSize / 2;
 
@@ -817,50 +899,32 @@ public class PieMenu extends FrameLayout {
         float distanceX = mCenter.x-x;
         float distanceY = mCenter.y-y;
         mCenterDistance = (float)Math.sqrt(Math.pow(distanceX, 2) + Math.pow(distanceY, 2));
-
         float shadeTreshold = mOuterChevronRadius; 
-        final boolean hapticFeedback = Settings.System.getInt(mContext.getContentResolver(),
-                Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0;
 
         int action = evt.getActionMasked();
         if (MotionEvent.ACTION_DOWN == action) {
             // Open panel
-            mPanel.show(true);
             animateIn();
         } else if (MotionEvent.ACTION_UP == action) {
             if (mOpen) {
                 PieItem item = mCurrentItem;
 
-                // Check for snap points first
-                for (int i = 0; i < 4; i++) {
-                    SnapPoint snap = mSnapPoint[i];
-                    if (snap.active) {
-                        if(hapticFeedback) mVibrator.vibrate(2);
-                        deselect();
-                        animateOut();
-                        mPanel.reorient(snap.gravity);
-                        return true;
-                    }
-                }
-
                 // Activate any panels?
                 mStatusPanel.hidePanels(true);
-                if (mStatusPanel.getFlipViewState() != -1) {
-                    switch(mStatusPanel.getFlipViewState()) {
-                        case PieStatusPanel.NOTIFICATIONS_PANEL:
-                            mStatusPanel.setCurrentViewState(PieStatusPanel.NOTIFICATIONS_PANEL);
-                            mStatusPanel.showNotificationsPanel();
-                            break;
-                        case PieStatusPanel.QUICK_SETTINGS_PANEL:
-                            mStatusPanel.setCurrentViewState(PieStatusPanel.QUICK_SETTINGS_PANEL);
-                            mStatusPanel.showTilesPanel();
-                            break;
-                    }
+                switch(mStatusPanel.getFlipViewState()) {
+                    case PieStatusPanel.NOTIFICATIONS_PANEL:
+                        mStatusPanel.setCurrentViewState(PieStatusPanel.NOTIFICATIONS_PANEL);
+                        mStatusPanel.showNotificationsPanel();
+                        break;
+                    case PieStatusPanel.QUICK_SETTINGS_PANEL:
+                        mStatusPanel.setCurrentViewState(PieStatusPanel.QUICK_SETTINGS_PANEL);
+                        mStatusPanel.showTilesPanel();
+                    break;
                 }
       
                 // Check for click actions
                 if (item != null && item.getView() != null && mCenterDistance < shadeTreshold) {
-                    if(hapticFeedback) mVibrator.vibrate(2);
+                    if(mHapticFeedback) mVibrator.vibrate(2);
                     item.getView().performClick();
                 }
             }
@@ -872,19 +936,18 @@ public class PieMenu extends FrameLayout {
         } else if (MotionEvent.ACTION_MOVE == action) {
 
             boolean snapActive = false;
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 3; i++) {
                 SnapPoint snap = mSnapPoint[i];                
                 float snapDistanceX = snap.x-x;
                 float snapDistanceY = snap.y-y;
                 float snapDistance = (float)Math.sqrt(Math.pow(snapDistanceX, 2) + Math.pow(snapDistanceY, 2));
 
-                if (mCenter.x == snap.x && mCenter.y == snap.y) {
-                    snap.alpha = 0x00;
-                    snap.active = false;
-                } else if (snapDistance < mSnapRadius) {
-                    snap.alpha = 50;
+                if (snapDistance < mSnapRadius) {
+                    snap.alpha = 60;
                     if (!snap.active) {
-                        if(hapticFeedback) mVibrator.vibrate(2);
+                        mAnimators[ANIMATOR_SNAP_GROW].cancel();
+                        mAnimators[ANIMATOR_SNAP_GROW].animator.start();
+                        if(mHapticFeedback) mVibrator.vibrate(2);
                     }
                     snap.active = true;
                     snapActive = true;
@@ -892,13 +955,16 @@ public class PieMenu extends FrameLayout {
                     mGlowOffsetLeft = 150;
                     mGlowOffsetRight = 150;
                 } else {
-                    snap.alpha = 10;
+                    if (snap.active) {
+                        mAnimators[ANIMATOR_SNAP_GROW].cancel();
+                    }
+                    snap.alpha = 30;
                     snap.active = false;
                 }
             }
 
             // Trigger the shades?
-            if (!snapActive && mCenterDistance > shadeTreshold) {
+            if (mCenterDistance > shadeTreshold) {
                 int state = -1;
                 switch (mPanelOrientation) {
                     case Gravity.BOTTOM:
@@ -922,14 +988,14 @@ public class PieMenu extends FrameLayout {
                         mGlowOffsetRight = mPanelOrientation != Gravity.TOP ? 150 : 255;;
                         mGlowOffsetLeft = mPanelOrientation != Gravity.TOP ? 255 : 150;
                         mStatusPanel.setFlipViewState(PieStatusPanel.QUICK_SETTINGS_PANEL);
-                        if(hapticFeedback) mVibrator.vibrate(2);
+                        if (mHapticFeedback && !snapActive) mVibrator.vibrate(2);
                     } else if (state == PieStatusPanel.NOTIFICATIONS_PANEL && 
                             mStatusPanel.getFlipViewState() != PieStatusPanel.NOTIFICATIONS_PANEL
                             && mStatusPanel.getCurrentViewState() != PieStatusPanel.NOTIFICATIONS_PANEL) {
                         mGlowOffsetRight = mPanelOrientation != Gravity.TOP ? 255 : 150;
                         mGlowOffsetLeft = mPanelOrientation != Gravity.TOP ? 150 : 255;
                         mStatusPanel.setFlipViewState(PieStatusPanel.NOTIFICATIONS_PANEL);
-                        if(hapticFeedback) mVibrator.vibrate(2);
+                        if (mHapticFeedback && !snapActive) mVibrator.vibrate(2);
                     }
                 }
                 deselect();
@@ -1004,6 +1070,7 @@ public class PieMenu extends FrameLayout {
         if (mItems != null) {
             int c = 0;
             for (PieItem item : mItems) {
+                if (!canItemDisplay(item)) continue;
                 if (inside(polar, item)) {
                     return item;
                 }
